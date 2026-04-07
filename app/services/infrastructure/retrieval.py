@@ -8,8 +8,7 @@ logger = logging.getLogger(__name__)
 
 class TagRetrievalService:
     """
-    Single source of truth for tag retrieval:
-    vector search → DB fetch → rerank → score fusion (0.7 * reranker + 0.3 * vector).
+    Vector search → DB fetch → rerank → score fusion (0.7 * reranker + 0.3 * vector).
     """
 
     def __init__(self, vector_store, repo, reranker):
@@ -29,9 +28,16 @@ class TagRetrievalService:
         if not db_tags:
             return []
 
-        reranked = self.reranker.rerank_tags_for_document(text, [t.name for t in db_tags])
+        tag_texts = [
+            f"{t.name}: {t.description}" if t.description else t.name
+            for t in db_tags
+        ]
+        reranked = self.reranker.rerank_tags_for_document(text, tag_texts)
 
-        name_to_tag = {t.name: t for t in db_tags}
+        name_to_tag = {
+            (f"{t.name}: {t.description}" if t.description else t.name): t
+            for t in db_tags
+        }
         scored = []
         for fmt_name, rr_score in reranked:
             tag = name_to_tag.get(fmt_name)

@@ -38,7 +38,8 @@ class TagService:
                 message="Tag already exists",
             )
 
-        embedding = self.embedder.embed_one(name)
+        tag_text = f"{name}: {description}" if description else name
+        embedding = self.embedder.embed_one(tag_text)
 
         if not force_create:
             similar = await self.tag_retrieval.retrieve(name, embedding)
@@ -81,12 +82,19 @@ class TagService:
         if not db_tags:
             return []
 
-        reranked = self.reranker.rerank(query, [t.name for t in db_tags])
-        name_to_tag = {t.name: t for t in db_tags}
+        tag_texts = [
+            f"{t.name}: {t.description}" if t.description else t.name
+            for t in db_tags
+        ]
+        reranked = self.reranker.rerank(query, tag_texts)
+        text_to_tag = {
+            (f"{t.name}: {t.description}" if t.description else t.name): t
+            for t in db_tags
+        }
 
         results = []
-        for name, rr_score in reranked[:top_k]:
-            tag = name_to_tag.get(name)
+        for tag_text, rr_score in reranked[:top_k]:
+            tag = text_to_tag.get(tag_text)
             if not tag:
                 continue
             v_score = vector_scores.get(tag.id, 0.0)

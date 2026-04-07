@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from sentence_transformers import InputExample, SentenceTransformer
 from sentence_transformers.cross_encoder import CrossEncoder
-from sentence_transformers.cross_encoder.evaluation import CEBinaryClassificationEvaluator
+from sentence_transformers.cross_encoder.evaluation import CERerankingEvaluator
 from torch.utils.data import DataLoader
 
 from app.config import settings, logger
@@ -102,16 +102,57 @@ def build_train_examples(
     return examples
 
 
-def build_val_examples(samples: List[Tuple[str, str]], cfg: FinetuneConfig) -> List[InputExample]:
-    """Full cross-product: every (doc, tag) pair, label=1 iff correct."""
+def mine_soft_positives(
+    samples: List[Tuple[str, str]],
+    base_model: str,
+    doc_max_chars: int,
+    tag_format: str,
+    threshold: float = 0.3,
+    batch_size: int = 32,
+) -> Dict[str, List[str]]:
+    """
+    Score every (doc, tag) pair with the pretrained cross-encoder.
+    Returns a map of doc_text -> list of tag names that score above
+    `threshold` (excluding the ground-truth label, which is always positive).
+    """
+    logger.info(f"Mining soft positives (threshold={threshold})...")
+    model = CrossEncoder(base_model, max_length=256)
+
+    result: Dict[str, List[str]] = {}
+    for doc_text, true_label in samples:
+        doc = doc_text[:doc_max_chars]
+        candidate_tags = [t for t in settings.DBPEDIA_CLASSES if t != true_label]
+        pairs = [[doc, format_tag(t, tag_format)] for t in candidate_tags]
+        scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
+        soft_pos = [t for t, score in zip(candidate_tags, scores) if score >= threshold]
+        result[doc] = soft_pos
+
+    logger.info(
+        f"Soft positives mined: avg {sum(len(v) for v in result.values()) / max(len(result), 1):.2f} per doc"
+    )
+    return result
+
+
+def build_val_examples(
+    samples: List[Tuple[str, str]],
+    cfg: FinetuneConfig,
+    soft_positives: Dict[str, List[str]] | None = None,
+) -> List[dict]:
+    """
+    For each doc, positives = true label + any soft positives;
+    negatives = all remaining tags.
+    """
     examples = []
     for doc_text, true_label in samples:
         doc = doc_text[:cfg.doc_max_chars]
-        for tag_name in settings.DBPEDIA_CLASSES:
-            examples.append(InputExample(
-                texts=[doc, format_tag(tag_name, cfg.tag_format)],
-                label=1.0 if tag_name == true_label else 0.0,
-            ))
+        extra = soft_positives.get(doc, []) if soft_positives else []
+        positives = list({true_label, *extra})
+        negatives = [t for t in settings.DBPEDIA_CLASSES if t not in positives]
+        examples.append({
+            "query": doc,
+            "positive": [format_tag(t, cfg.tag_format) for t in positives],
+            "negative": [format_tag(t, cfg.tag_format) for t in negatives],
+        })
     return examples
 
 
@@ -133,12 +174,15 @@ def finetune(cfg: FinetuneConfig) -> str:
 
     hard_neg_map = mine_hard_negatives(train_raw, n_hard=cfg.hard_negatives, doc_max_chars=cfg.doc_max_chars)
     train_examples = build_train_examples(train_raw, cfg, hard_neg_map)
-    val_examples = build_val_examples(val_raw, cfg)
+    soft_pos_map = mine_soft_positives(
+        val_raw, cfg.base_model, cfg.doc_max_chars, cfg.tag_format
+    )
+    val_examples = build_val_examples(val_raw, cfg, soft_positives=soft_pos_map)
 
     model = CrossEncoder(cfg.base_model, num_labels=1, max_length=cfg.max_length, device=device)
 
     train_loader = DataLoader(train_examples, shuffle=True, batch_size=cfg.batch_size)
-    evaluator = CEBinaryClassificationEvaluator.from_input_examples(val_examples, name="dbpedia_val")
+    evaluator = CERerankingEvaluator(val_examples, name="dbpedia_val")
     total_steps = len(train_loader) * cfg.epochs
 
     model.fit(
