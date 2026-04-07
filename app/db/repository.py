@@ -103,7 +103,7 @@ class PendingReviewRepository(BaseRepository[PendingReview]):
     async def get_pending(self, limit: int = 20) -> List[PendingReview]:
         result = await self.db.execute(
             select(PendingReview)
-            .where(PendingReview.resolved == False  # noqa: E712)
+            .where(PendingReview.resolved == False)
             .order_by(PendingReview.created_at.desc())
             .limit(limit)
         )
