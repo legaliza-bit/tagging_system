@@ -1,0 +1,84 @@
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: tagging_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tagging
+      POSTGRES_PASSWORD: tagging
+      POSTGRES_DB: tagging
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  qdrant:
+    image: qdrant/qdrant:v1.9.2
+    container_name: tagging_qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tagging_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tagging:tagging@postgres:5432/tagging
+      DATABASE_URL_SYNC: postgresql://tagging:tagging@postgres:5432/tagging
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      EMBEDDING_MODEL: all-MiniLM-L6-v2
+      RERANKER_BASE_MODEL: cross-encoder/ms-marco-MiniLM-L-6-v2
+      TAG_DEDUP_THRESHOLD: "0.80"
+      TAG_ASSIGNMENT_THRESHOLD: "0.50"
+      UNCERTAINTY_THRESHOLD: "0.60"
+      PYTHONUNBUFFERED: "1"
+      HF_HOME: /app/.cache/huggingface
+      TORCH_HOME: /app/.cache/torch
+      HF_TOKEN: ${HF_TOKEN}
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - qdrant
+    volumes:
+      - model_cache:/app/.cache/huggingface
+      - finetuned_model:/models
+      - ./app:/app/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    container_name: tagging_ui
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+    volumes:
+      - ./ui:/ui
+    command: >
+      streamlit run streamlit_app.py
+      --server.address=0.0.0.0
+      --server.port=8501
+      --server.headless=true
+      --server.runOnSave=true
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  model_cache:
+  finetuned_model:
