@@ -5,7 +5,7 @@ from typing import List, Optional, Tuple
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
-from tagging_service.app.config import settings, logger
+from app.config import settings, logger
 
 
 class VectorStoreService:

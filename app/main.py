@@ -5,8 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import documents, tags
-from tagging_service.app.config import settings
-from tagging_service.app.db.schemas import AsyncSessionLocal, init_db
+from app.db.schemas import AsyncSessionLocal, init_db
 from app.db.repository import TagRepository
 from app.services.infrastructure.embedding import EmbeddingService
 from app.services.infrastructure.reranker import RerankerService

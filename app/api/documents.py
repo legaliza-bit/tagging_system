@@ -3,7 +3,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tagging_service.app.db.schemas import get_db
+from app.db.schemas import get_db
 from app.schemas.document import DocumentCreate, DocumentResponse
 from app.services.application.document_service import DocumentService
 

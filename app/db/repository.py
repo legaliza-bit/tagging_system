@@ -4,7 +4,7 @@ from typing import Generic, List, Optional, TypeVar
 from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Document, DocumentTag, PendingReview, Tag
+from app.db.schemas import Document, DocumentTag, PendingReview, Tag
 
 T = TypeVar("T")
 

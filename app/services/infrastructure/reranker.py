@@ -5,7 +5,7 @@ from typing import List, Tuple
 
 from sentence_transformers.cross_encoder import CrossEncoder
 
-from tagging_service.app.config import settings
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
