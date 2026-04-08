@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List
+from pydantic import BaseModel, Field, model_validator
+from typing import Optional, List, Any
 from datetime import datetime
 
 
@@ -29,6 +29,22 @@ class DocumentResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_tags(cls, data: Any) -> Any:
+        if hasattr(data, "document_tags"):
+            data.__dict__.setdefault("tags", [
+                TagBrief(
+                    id=dt.tag.id,
+                    name=dt.tag.name,
+                    confidence=dt.confidence,
+                    is_human_verified=dt.is_human_verified,
+                )
+                for dt in (data.document_tags or [])
+                if dt.tag is not None
+            ])
+        return data
 
 
 class TaggingResult(BaseModel):

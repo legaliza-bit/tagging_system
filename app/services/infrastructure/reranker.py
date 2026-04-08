@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from typing import List, Tuple
 
+import numpy as np
 from sentence_transformers.cross_encoder import CrossEncoder
 
 from app.config import settings
@@ -49,18 +50,24 @@ class RerankerService:
             return f"{name}: {desc}" if desc else name
         return name
 
+    @staticmethod
+    def _sigmoid(logits) -> np.ndarray:
+        return 1.0 / (1.0 + np.exp(-np.array(logits, dtype=float)))
+
     def _score_pairs(self, query: str, candidates: List[str]) -> List[Tuple[str, float]]:
         if not candidates:
             return []
         pairs = [[query, c] for c in candidates]
-        raw_scores = self._model.predict(pairs, show_progress_bar=False)
-        return sorted(zip(candidates, raw_scores.tolist()), key=lambda x: x[1], reverse=True)
+        logits = self._model.predict(pairs, show_progress_bar=False)
+        scores = self._sigmoid(logits).tolist()
+        return sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
 
     def score_pairs_raw(self, pairs: List[Tuple[str, str]]) -> List[float]:
         """Score arbitrary (a, b) pairs in input order. No sorting."""
         if not pairs:
             return []
-        return self._model.predict(list(pairs), show_progress_bar=False).tolist()
+        logits = self._model.predict(list(pairs), show_progress_bar=False)
+        return self._sigmoid(logits).tolist()
 
     def rerank_tags_for_document(
         self, document_text: str, tag_names: List[str]

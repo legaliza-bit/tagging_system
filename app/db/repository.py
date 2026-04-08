@@ -1,10 +1,10 @@
-from datetime import datetime, timezone
 from typing import Generic, List, Optional, TypeVar
 
 from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.db.schemas import Document, DocumentTag, PendingReview, Tag
+from app.db.schemas import Document, DocumentTag, Tag
 
 T = TypeVar("T")
 
@@ -60,14 +60,46 @@ class TagRepository(BaseRepository[Tag]):
         )
         await self.db.flush()
 
+    async def get_tag_doc_counts(self) -> dict:
+        """Return {tag_id: document_count} for all tags that have assignments."""
+        result = await self.db.execute(
+            select(DocumentTag.tag_id, func.count(DocumentTag.document_id))
+            .group_by(DocumentTag.tag_id)
+        )
+        return {tag_id: count for tag_id, count in result.all()}
+
 
 class DocumentRepository(BaseRepository[Document]):
     def __init__(self, db: AsyncSession):
         super().__init__(db, Document)
 
+    async def get_all(self, limit: int = 100, offset: int = 0) -> List[Document]:
+        result = await self.db.execute(
+            select(Document)
+            .options(selectinload(Document.document_tags).selectinload(DocumentTag.tag))
+            .offset(offset).limit(limit)
+        )
+        return result.scalars().all()
+
+    async def get_by_id(self, id_: str) -> Optional[Document]:
+        result = await self.db.execute(
+            select(Document)
+            .options(selectinload(Document.document_tags).selectinload(DocumentTag.tag))
+            .where(Document.id == id_)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_page(self, offset: int, limit: int) -> List[Document]:
+        """Fetch a page of documents without eager-loading relations."""
+        result = await self.db.execute(
+            select(Document).offset(offset).limit(limit)
+        )
+        return result.scalars().all()
+
     async def list_by_tag(self, tag_id: str, limit: int = 50) -> List[Document]:
         result = await self.db.execute(
             select(Document)
+            .options(selectinload(Document.document_tags).selectinload(DocumentTag.tag))
             .join(DocumentTag, Document.id == DocumentTag.document_id)
             .where(DocumentTag.tag_id == tag_id)
             .limit(limit)
@@ -92,27 +124,5 @@ class DocumentRepository(BaseRepository[Document]):
             update(Document)
             .where(Document.id == doc_id)
             .values(is_tagged=True, tagging_confidence=max_conf)
-        )
-        await self.db.flush()
-
-
-class PendingReviewRepository(BaseRepository[PendingReview]):
-    def __init__(self, db: AsyncSession):
-        super().__init__(db, PendingReview)
-
-    async def get_pending(self, limit: int = 20) -> List[PendingReview]:
-        result = await self.db.execute(
-            select(PendingReview)
-            .where(PendingReview.resolved == False)
-            .order_by(PendingReview.created_at.desc())
-            .limit(limit)
-        )
-        return result.scalars().all()
-
-    async def resolve(self, review_id: str) -> None:
-        await self.db.execute(
-            update(PendingReview)
-            .where(PendingReview.id == review_id)
-            .values(resolved=True, resolved_at=datetime.now(timezone.utc))
         )
         await self.db.flush()

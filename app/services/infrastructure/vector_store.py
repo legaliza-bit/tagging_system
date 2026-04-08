@@ -76,14 +76,14 @@ class VectorStoreService:
         self, embedding: List[float], top_k: int = 10, exclude_ids: Optional[List[str]] = None
     ) -> List[Tuple[str, float]]:
         """ANN search in tag collection. Returns [(tag_id, score), ...] descending."""
-        results = await self.client.search(
+        results = await self.client.query_points(
             collection_name=self.tag_collection,
-            query_vector=embedding,
+            query=embedding,
             limit=top_k + (len(exclude_ids) if exclude_ids else 0),
             with_payload=True,
         )
         output = []
-        for r in results:
+        for r in results.points:
             tag_id = r.payload.get("tag_id")
             if exclude_ids and tag_id in exclude_ids:
                 continue
@@ -94,13 +94,13 @@ class VectorStoreService:
         self, embedding: List[float], top_k: int = 10
     ) -> List[Tuple[str, float]]:
         """ANN search in document collection. Returns [(doc_id, score), ...] descending."""
-        results = await self.client.search(
+        results = await self.client.query_points(
             collection_name=self.doc_collection,
-            query_vector=embedding,
+            query=embedding,
             limit=top_k,
             with_payload=True,
         )
-        return [(r.payload.get("doc_id"), r.score) for r in results]
+        return [(r.payload.get("doc_id"), r.score) for r in results.points]
 
     async def delete_tag(self, point_id: str) -> None:
         await self.client.delete(

@@ -1,25 +1,41 @@
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.schemas import get_db
+from app.db.schemas import AsyncSessionLocal, get_db
 from app.schemas.tag import SimilarTag, TagCreate, TagCreateResult, TagResponse
+from app.services.application.document_service import DocumentService
 from app.services.application.tag_service import TagService
 
 router = APIRouter(prefix="/tags", tags=["tags"])
 
 
+async def _retag_documents(tag_id: str, tag_name: str) -> None:
+    async with AsyncSessionLocal() as db:
+        svc = DocumentService(db)
+        await svc.retag_with_new_tag(tag_id, tag_name)
+
+
 @router.post("/", response_model=TagCreateResult, status_code=201)
-async def create_tag(payload: TagCreate, db: AsyncSession = Depends(get_db)):
+async def create_tag(
+    payload: TagCreate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     """Create a tag with semantic deduplication.
     Use force_create=True to bypass."""
     svc = TagService(db)
-    return await svc.create_tag(
+    result = await svc.create_tag(
         name=payload.name,
         description=payload.description,
         force_create=payload.force_create,
     )
+    if result.created:
+        background_tasks.add_task(
+            _retag_documents, result.tag.id, result.tag.name
+        )
+    return result
 
 
 @router.get("/search", response_model=List[SimilarTag])

@@ -15,8 +15,9 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 384
 
     TAG_DEDUP_THRESHOLD: float = 0.80
-    TAG_ASSIGNMENT_THRESHOLD: float = 0.50
-    UNCERTAINTY_THRESHOLD: float = 0.60
+    TAG_ASSIGNMENT_THRESHOLD: float = 0.65
+    TAG_SCORE_MARGIN: float = 0.10   # drop tags scoring more than this below the best
+    TAG_FREQ_ALPHA: float = 0.30     # frequency penalty weight: score -= alpha * (count/total)
     TOP_K_CANDIDATES: int = 10
     TOP_K_TAGS: int = 5
 

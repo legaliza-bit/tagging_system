@@ -7,9 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
-    streamlit>=1.56.0 \
-    requests>=2.33.1 \
-    plotly>=6.6.0
+    "streamlit>=1.56.0" \
+    "requests>=2.33.1" \
+    "plotly>=6.6.0"
 
 COPY ui/ ./
 

@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import List, Tuple
 
 from app.config import settings
@@ -8,7 +9,8 @@ logger = logging.getLogger(__name__)
 
 class TagRetrievalService:
     """
-    Vector search → DB fetch → rerank → score fusion (0.7 * reranker + 0.3 * vector).
+    Vector search → DB fetch → rerank → score fusion
+    → relative scoring + frequency penalty.
     """
 
     def __init__(self, vector_store, repo, reranker):
@@ -17,7 +19,9 @@ class TagRetrievalService:
         self.reranker = reranker
 
     async def retrieve(self, text: str, embedding: List[float]) -> List[Tuple]:
-        hits = await self.vector_store.search_similar_tags(embedding, settings.TOP_K_CANDIDATES)
+        hits = await self.vector_store.search_similar_tags(
+            embedding, settings.TOP_K_CANDIDATES
+        )
         if not hits:
             return []
 
@@ -38,6 +42,8 @@ class TagRetrievalService:
             (f"{t.name}: {t.description}" if t.description else t.name): t
             for t in db_tags
         }
+
+        # Base score fusion
         scored = []
         for fmt_name, rr_score in reranked:
             tag = name_to_tag.get(fmt_name)
@@ -46,4 +52,18 @@ class TagRetrievalService:
             score = 0.7 * rr_score + 0.3 * vector_scores.get(tag.id, 0.0)
             scored.append((tag, score))
 
-        return sorted(scored, key=lambda x: x[1], reverse=True)
+        if not scored:
+            return []
+
+        # Frequency penalty: adjusted = score - alpha * (tag_doc_count / total_docs)
+        if settings.TAG_FREQ_ALPHA > 0:
+            total_docs = await self.repo.count()
+            if total_docs > 0:
+                tag_doc_counts = await self.repo.get_tag_doc_counts()
+                scored = [
+                    (tag, score - settings.TAG_FREQ_ALPHA * (tag_doc_counts.get(tag.id, 0) / total_docs))
+                    for tag, score in scored
+                ]
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored

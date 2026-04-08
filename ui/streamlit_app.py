@@ -61,9 +61,6 @@ page = st.sidebar.radio(
         "Dashboard",
         "Add Document",
         "Create Tag",
-        "Explore Tags",
-        "Review Queue",
-        "Fine-tune Model",
     ],
 )
 
@@ -74,10 +71,6 @@ if stats:
     st.sidebar.metric("Tags", stats.get("tags", 0))
 
 
-# ═════════════════════════════════════════════
-# 1. DASHBOARD
-# ═════════════════════════════════════════════
-
 if page == "Dashboard":
     st.title("📊 Dashboard")
 
@@ -85,30 +78,44 @@ if page == "Dashboard":
         "2-stage pipeline: bi-encoder retrieval → cross-encoder reranking"
     )
 
-    if stats:
-        c1, c2 = st.columns(2)
-        c1.metric("Documents", stats["documents"])
-        c2.metric("Tags", stats["tags"])
+    tags = get("/tags/", {"limit": 200})
+
+    if not tags:
+        st.info("No tags")
+        st.stop()
+
+    tag_map = {t["name"]: t["id"] for t in tags}
+    selected = st.selectbox("Select tag", list(tag_map.keys()))
+
+    tag_id = tag_map[selected]
+
+    tag = get(f"/tags/{tag_id}")
+    if tag:
+        st.subheader(tag["name"])
+        st.caption(tag.get("description", ""))
 
     st.divider()
+    st.subheader("Documents")
 
-    st.subheader("Recent Documents")
-    docs = get("/documents/", {"limit": 10})
+    docs = get(f"/documents/by-tag/{tag_id}", {"limit": 50})
 
-    if docs:
-        for d in docs:
-            with st.expander(d.get("title") or d["id"][:12]):
-                st.write(d["content"][:400])
-                render_tags(d.get("tags"))
-                if d.get("dbpedia_label"):
-                    st.caption(f"Ground truth: {d['dbpedia_label']}")
+    if not docs:
+        st.info("No documents for this tag")
     else:
-        st.info("No documents yet.")
+        id_filter = st.text_input("Filter by ID", placeholder="Paste a document ID...")
+        if id_filter:
+            docs = [d for d in docs if id_filter.strip().lower() in d["id"].lower()]
 
+        for d in docs:
+            st.markdown(f"`{d['id']}`")
+            st.markdown(
+                f"<div style='border:1px solid #ddd; border-radius:6px; padding:12px; margin-bottom:12px'>"
+                f"{d['content'][:400]}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            render_tags(d.get("tags"))
 
-# ═════════════════════════════════════════════
-# 2. ADD DOCUMENT
-# ═════════════════════════════════════════════
 
 elif page == "Add Document":
     st.title("📄 Add Document")
@@ -130,10 +137,6 @@ elif page == "Add Document":
                 st.subheader("Assigned Tags")
                 render_tags(res.get("tags"))
 
-
-# ═════════════════════════════════════════════
-# 3. CREATE TAG
-# ═════════════════════════════════════════════
 
 elif page == "Create Tag":
     st.title("🏷️ Create Tag")
@@ -172,86 +175,3 @@ elif page == "Create Tag":
         })
         if res:
             st.success(f"Created: {res['tag']['name']}")
-
-
-# ═════════════════════════════════════════════
-# 4. EXPLORE TAGS
-# ═════════════════════════════════════════════
-
-elif page == "Explore Tags":
-    st.title("🔍 Explore Tags")
-
-    tags = get("/tags/", {"limit": 200})
-
-    if not tags:
-        st.info("No tags")
-        st.stop()
-
-    tag_map = {t["name"]: t["id"] for t in tags}
-    selected = st.selectbox("Select tag", list(tag_map.keys()))
-
-    tag_id = tag_map[selected]
-
-    tag = get(f"/tags/{tag_id}")
-    if tag:
-        st.subheader(tag["name"])
-        st.caption(tag.get("description", ""))
-
-    st.divider()
-    st.subheader("Documents")
-
-    docs = get(f"/documents/by-tag/{tag_id}", {"limit": 50})
-
-    if docs:
-        for d in docs:
-            with st.expander(d.get("title") or d["id"][:12]):
-                st.write(d["content"][:400])
-                render_tags(d.get("tags"))
-    else:
-        st.info("No documents for this tag")
-
-
-# ═════════════════════════════════════════════
-# 5. REVIEW QUEUE
-# ═════════════════════════════════════════════
-
-elif page == "Review Queue":
-    st.title("🧑‍⚖️ Review Queue")
-
-    reviews = get("/documents/reviews/pending", {"limit": 20})
-
-    if not reviews:
-        st.success("No pending reviews")
-        st.stop()
-
-    for r in reviews:
-        with st.expander(r["document_id"][:12], expanded=True):
-            st.write(r["document_content"][:300])
-
-            options = {
-                c["tag_name"]: c["tag_id"]
-                for c in r.get("candidates", [])
-            }
-
-            selected = st.selectbox(
-                "Select tag",
-                list(options.keys()),
-                key=r["review_id"],
-            )
-
-            new_tag = st.text_input(
-                "Or new tag",
-                key=f"new_{r['review_id']}",
-            )
-
-            if st.button("Resolve", key=r["review_id"]):
-                payload = {
-                    "review_id": r["review_id"],
-                    "accepted_tag_ids": [options[selected]] if selected else [],
-                    "new_tag_name": new_tag or None,
-                }
-
-                res = post("/documents/reviews/resolve", payload)
-                if res:
-                    st.success("Resolved")
-                    st.rerun()

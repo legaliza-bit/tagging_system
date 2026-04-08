@@ -36,6 +36,13 @@ class FinetuneConfig:
     doc_max_chars: int = 400
 
 
+@dataclass
+class Sample:
+    id: int
+    text: str
+    label: str
+
+
 def format_tag(name: str, tag_format: str) -> str:
     if tag_format == "name+desc":
         desc = settings.DBPEDIA_DESCRIPTIONS.get(name, "")
@@ -43,62 +50,63 @@ def format_tag(name: str, tag_format: str) -> str:
     return name
 
 
-def mine_hard_negatives(
-    samples: List[Tuple[str, str]],
-    n_hard: int,
-    doc_max_chars: int,
-    batch_size: int = 128,
-) -> Dict[str, List[str]]:
-    """Use bi-encoder to find the top-n wrong tags most likely to confuse the model."""
-    logger.info(f"Mining hard negatives (n_hard={n_hard})...")
-    biencoder = SentenceTransformer(settings.EMBEDDING_MODEL)
-    tag_texts = [format_tag(t, "name+desc") for t in settings.DBPEDIA_CLASSES]
-    tag_embs = biencoder.encode(tag_texts, normalize_embeddings=True, show_progress_bar=False)
+def mine_hard_negatives(samples, tag_texts, cfg):
+    model = SentenceTransformer(settings.EMBEDDING_MODEL, device=cfg.device)
 
-    texts = [s[0][:doc_max_chars] for s in samples]
-    labels = [s[1] for s in samples]
-    result: Dict[str, List[str]] = {}
+    tag_names = list(tag_texts.keys())
+    tag_embs = model.encode(
+        [tag_texts[t] for t in tag_names],
+        normalize_embeddings=True
+    )
 
-    for i in range(0, len(texts), batch_size):
-        batch_texts = texts[i: i + batch_size]
-        batch_labels = labels[i: i + batch_size]
-        doc_embs = biencoder.encode(batch_texts, normalize_embeddings=True, show_progress_bar=False)
-        sims = doc_embs @ tag_embs.T
+    result = {}
 
-        for j, (sim_row, true_label) in enumerate(zip(sims, batch_labels)):
-            ranked = sorted(
-                [(settings.DBPEDIA_CLASSES[k], float(sim_row[k]))
-                 for k in range(len(settings.DBPEDIA_CLASSES))
-                 if settings.DBPEDIA_CLASSES[k] != true_label],
-                key=lambda x: x[1], reverse=True,
-            )
-            result[batch_texts[j]] = [t for t, _ in ranked[:n_hard]]
+    for sample in samples:
+        doc_emb = model.encode(sample.text, normalize_embeddings=True)
+        sims = doc_emb @ tag_embs.T
 
-        if i % (batch_size * 8) == 0:
-            logger.info(f"  {min(i + batch_size, len(texts)):,}/{len(texts):,}")
+        ranked = sorted(
+            [
+                (tag_names[i], float(sims[i]))
+                for i in range(len(tag_names))
+                if tag_names[i] != sample.label
+            ],
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        result[sample.id] = [t for t, _ in ranked[:cfg.hard_negatives]]
 
     return result
 
 
-def build_train_examples(
-    samples: List[Tuple[str, str]],
-    cfg: FinetuneConfig,
-    hard_neg_map: Dict[str, List[str]],
-) -> List[InputExample]:
+def build_train_examples(samples, tag_texts, hard_neg_map, cfg):
     rng = random.Random(cfg.seed)
-    examples: List[InputExample] = []
+    examples = []
 
-    for doc_text, true_label in samples:
-        doc = doc_text[:cfg.doc_max_chars]
-        examples.append(InputExample(texts=[doc, format_tag(true_label, cfg.tag_format)], label=1.0))
-        for neg in hard_neg_map.get(doc, [])[:cfg.hard_negatives]:
-            examples.append(InputExample(texts=[doc, format_tag(neg, cfg.tag_format)], label=0.0))
-        other = [t for t in settings.DBPEDIA_CLASSES if t != true_label]
+    for s in samples:
+        # positive
+        examples.append(InputExample(
+            texts=[s.text, tag_texts[s.label]],
+            label=1.0
+        ))
+
+        # hard negatives
+        for neg in hard_neg_map.get(s.id, []):
+            examples.append(InputExample(
+                texts=[s.text, tag_texts[neg]],
+                label=0.0
+            ))
+
+        # random negatives
+        other = [t for t in tag_texts if t != s.label]
         for neg in rng.sample(other, min(cfg.random_negatives, len(other))):
-            examples.append(InputExample(texts=[doc, format_tag(neg, cfg.tag_format)], label=0.0))
+            examples.append(InputExample(
+                texts=[s.text, tag_texts[neg]],
+                label=0.0
+            ))
 
     rng.shuffle(examples)
-    logger.info(f"Training set: {len(examples):,} examples.")
     return examples
 
 
@@ -133,91 +141,54 @@ def mine_soft_positives(
     return result
 
 
-def build_val_examples(
-    samples: List[Tuple[str, str]],
-    cfg: FinetuneConfig,
-    soft_positives: Dict[str, List[str]] | None = None,
-) -> List[dict]:
-    """
-    For each doc, positives = true label + any soft positives;
-    negatives = all remaining tags.
-    """
-    examples = []
-    for doc_text, true_label in samples:
-        doc = doc_text[:cfg.doc_max_chars]
-        extra = soft_positives.get(doc, []) if soft_positives else []
-        positives = list({true_label, *extra})
-        negatives = [t for t in settings.DBPEDIA_CLASSES if t not in positives]
-        examples.append({
-            "query": doc,
-            "positive": [format_tag(t, cfg.tag_format) for t in positives],
-            "negative": [format_tag(t, cfg.tag_format) for t in negatives],
-        })
-    return examples
+def build_val_examples(samples, tag_texts):
+    return [
+        {
+            "query": s.text,
+            "positive": [tag_texts[s.label]],
+            "negative": [
+                tag_texts[t]
+                for t in tag_texts if t != s.label
+            ],
+        }
+        for s in samples
+    ]
 
 
-def finetune(cfg: FinetuneConfig) -> str:
-    """Run the full fine-tuning pipeline. Returns saved model directory."""
-    random.seed(cfg.seed)
-    np.random.seed(cfg.seed)
-    torch.manual_seed(cfg.seed)
+def train(cfg):
+    train_samples = load_dbpedia_samples("train", cfg.train_samples, cfg.doc_max_chars)
+    val_samples = load_dbpedia_samples("test", cfg.val_samples, cfg.doc_max_chars)
 
-    output_dir = Path(cfg.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    tag_texts = format_tag(cfg.tag_format)
 
-    device = cfg.device
-    logger.info(f"Device: {device}")
-    logger.info(f"Config:\n{json.dumps(asdict(cfg), indent=2)}")
+    hard_neg_map = mine_hard_negatives(train_samples, tag_texts, cfg)
 
-    train_raw = load_dbpedia_samples("train", cfg.train_samples)
-    val_raw = load_dbpedia_samples("test",  cfg.val_samples)
-
-    hard_neg_map = mine_hard_negatives(train_raw, n_hard=cfg.hard_negatives, doc_max_chars=cfg.doc_max_chars)
-    train_examples = build_train_examples(train_raw, cfg, hard_neg_map)
-    soft_pos_map = mine_soft_positives(
-        val_raw, cfg.base_model, cfg.doc_max_chars, cfg.tag_format
+    train_examples = build_train_examples(
+        train_samples, tag_texts, hard_neg_map, cfg
     )
-    val_examples = build_val_examples(val_raw, cfg, soft_positives=soft_pos_map)
 
-    model = CrossEncoder(cfg.base_model, num_labels=1, max_length=cfg.max_length, device=device)
+    val_examples = build_val_examples(val_samples, tag_texts)
 
-    train_loader = DataLoader(train_examples, shuffle=True, batch_size=cfg.batch_size)
-    evaluator = CERerankingEvaluator(val_examples, name="dbpedia_val")
-    total_steps = len(train_loader) * cfg.epochs
+    model = CrossEncoder(
+        cfg.base_model,
+        num_labels=1,
+        max_length=cfg.max_length,
+        device=cfg.device
+    )
+
+    loader = DataLoader(train_examples, batch_size=cfg.batch_size, shuffle=True)
+
+    evaluator = CERerankingEvaluator(val_examples)
 
     model.fit(
-        train_dataloader=train_loader,
+        train_dataloader=loader,
         evaluator=evaluator,
         epochs=cfg.epochs,
-        warmup_steps=int(total_steps * cfg.warmup_ratio),
-        output_path=str(output_dir),
-        save_best_model=True,
-        optimizer_params={"lr": cfg.learning_rate, "weight_decay": cfg.weight_decay},
-        show_progress_bar=True,
-        evaluation_steps=max(1, len(train_loader) // 4),
+        warmup_steps=int(len(loader) * cfg.epochs * cfg.warmup_ratio),
+        optimizer_params={"lr": cfg.learning_rate},
+        max_grad_norm=1.0,
+        output_path=cfg.output_dir,
     )
-
-    correct = sum(
-        settings.DBPEDIA_CLASSES[int(np.argmax(
-            model.predict([[doc_text[:cfg.doc_max_chars], format_tag(t, cfg.tag_format)]
-                           for t in settings.DBPEDIA_CLASSES], show_progress_bar=False)
-        ))] == true_label
-        for doc_text, true_label in val_raw
-    )
-    final_acc = correct / len(val_raw)
-    logger.info(f"Final top-1 accuracy: {final_acc:.1%}")
-
-    meta = {
-        **asdict(cfg),
-        "final_top1_accuracy": round(final_acc, 4),
-        "dbpedia_classes": settings.DBPEDIA_CLASSES,
-        "dbpedia_descriptions": settings.DBPEDIA_DESCRIPTIONS,
-    }
-    with open(output_dir / "finetune_meta.json", "w") as f:
-        json.dump(meta, f, indent=2)
-
-    print(f"\nFine-tuned model: {output_dir}  |  top-1 acc: {final_acc:.1%}\n")
-    return str(output_dir)
 
 
 if __name__ == "__main__":
@@ -239,4 +210,4 @@ if __name__ == "__main__":
     p.add_argument("--seed",             type=int,   default=42)
     p.add_argument("--device", default="cpu",
                    choices=["cpu", "cuda", "mps"])
-    finetune(FinetuneConfig(**vars(p.parse_args())))
+    train(FinetuneConfig(**vars(p.parse_args())))

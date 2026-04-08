@@ -34,13 +34,20 @@ async def lifespan(app: FastAPI):
     logger.info("ML models loaded.")
 
     try:
-        from app.services.infrastructure.dbpedia_loader import seed_dbpedia_tags
+        from app.services.infrastructure.dbpedia_loader import seed_dbpedia_tags, seed_dbpedia_documents
+        from app.db.repository import DocumentRepository
         async with AsyncSessionLocal() as session:
-            repo = TagRepository(session)
-            count = await repo.count()
-            if count == 0:
+            tag_repo = TagRepository(session)
+            tag_count = await tag_repo.count()
+            if tag_count == 0:
                 logger.info("No tags found. Seeding DBpedia ontology tags...")
                 await seed_dbpedia_tags(session)
+
+            doc_repo = DocumentRepository(session)
+            doc_count = await doc_repo.count()
+            if doc_count == 0:
+                logger.info("No documents found. Seeding DBpedia sample documents...")
+                await seed_dbpedia_documents(session, max_per_class=20)
     except Exception as e:
         logger.warning(f"DBpedia seeding skipped: {e}")
 

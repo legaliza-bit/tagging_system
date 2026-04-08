@@ -20,7 +20,7 @@ services:
       start_period: 10s
 
   qdrant:
-    image: qdrant/qdrant:v1.9.2
+    image: qdrant/qdrant:v1.13.6
     container_name: tagging_qdrant
     restart: unless-stopped
     volumes:
@@ -52,7 +52,6 @@ services:
       RERANKER_BASE_MODEL: cross-encoder/ms-marco-MiniLM-L-6-v2
       TAG_DEDUP_THRESHOLD: "0.80"
       TAG_ASSIGNMENT_THRESHOLD: "0.50"
-      UNCERTAINTY_THRESHOLD: "0.60"
       HF_HOME: /app/.cache/huggingface
       TORCH_HOME: /app/.cache/torch
       HF_TOKEN: ${HF_TOKEN}
