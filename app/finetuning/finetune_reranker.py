@@ -16,6 +16,9 @@ from app.config import settings, logger
 from app.services.infrastructure.dbpedia_loader import load_dbpedia_samples
 
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
 @dataclass
 class FinetuneConfig:
     base_model: str = settings.RERANKER_BASE_MODEL
@@ -70,7 +73,7 @@ def load_samples(split: str, n: int, doc_max_chars: int) -> list[Sample]:
 
 
 def mine_hard_negatives(samples, tag_texts, cfg):
-    model = SentenceTransformer(settings.EMBEDDING_MODEL, device=cfg.device)
+    model = SentenceTransformer(settings.EMBEDDING_MODEL, device=device)
 
     tag_names = list(tag_texts.keys())
     tag_embs = model.encode(
@@ -161,7 +164,7 @@ def train(cfg):
         cfg.base_model,
         num_labels=1,
         max_length=cfg.max_length,
-        device=cfg.device
+        device=device,
     )
 
     loader = DataLoader(train_examples, batch_size=cfg.batch_size, shuffle=True)
@@ -196,6 +199,4 @@ if __name__ == "__main__":
     p.add_argument("--tag_format",       choices=["name", "name+desc"], default="name+desc")
     p.add_argument("--doc_max_chars",    type=int,   default=400)
     p.add_argument("--seed",             type=int,   default=42)
-    p.add_argument("--device", default="cpu",
-                   choices=["cpu", "cuda", "mps"])
     train(FinetuneConfig(**vars(p.parse_args())))
