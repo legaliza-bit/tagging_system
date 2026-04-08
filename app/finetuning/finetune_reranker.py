@@ -50,6 +50,25 @@ def format_tag(name: str, tag_format: str) -> str:
     return name
 
 
+def build_tag_texts(tag_format: str):
+    return {
+        t: format_tag(t, tag_format)
+        for t in settings.DBPEDIA_CLASSES
+    }
+
+
+def load_samples(split: str, n: int, doc_max_chars: int) -> list[Sample]:
+    raw = load_dbpedia_samples(split, n)
+    return [
+        Sample(
+            id=i,
+            text=text[:doc_max_chars],
+            label=label
+        )
+        for i, (text, label) in enumerate(raw)
+    ]
+
+
 def mine_hard_negatives(samples, tag_texts, cfg):
     model = SentenceTransformer(settings.EMBEDDING_MODEL, device=cfg.device)
 
@@ -110,37 +129,6 @@ def build_train_examples(samples, tag_texts, hard_neg_map, cfg):
     return examples
 
 
-def mine_soft_positives(
-    samples: List[Tuple[str, str]],
-    base_model: str,
-    doc_max_chars: int,
-    tag_format: str,
-    threshold: float = 0.3,
-    batch_size: int = 32,
-) -> Dict[str, List[str]]:
-    """
-    Score every (doc, tag) pair with the pretrained cross-encoder.
-    Returns a map of doc_text -> list of tag names that score above
-    `threshold` (excluding the ground-truth label, which is always positive).
-    """
-    logger.info(f"Mining soft positives (threshold={threshold})...")
-    model = CrossEncoder(base_model, max_length=256)
-
-    result: Dict[str, List[str]] = {}
-    for doc_text, true_label in samples:
-        doc = doc_text[:doc_max_chars]
-        candidate_tags = [t for t in settings.DBPEDIA_CLASSES if t != true_label]
-        pairs = [[doc, format_tag(t, tag_format)] for t in candidate_tags]
-        scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
-        soft_pos = [t for t, score in zip(candidate_tags, scores) if score >= threshold]
-        result[doc] = soft_pos
-
-    logger.info(
-        f"Soft positives mined: avg {sum(len(v) for v in result.values()) / max(len(result), 1):.2f} per doc"
-    )
-    return result
-
-
 def build_val_examples(samples, tag_texts):
     return [
         {
@@ -156,10 +144,10 @@ def build_val_examples(samples, tag_texts):
 
 
 def train(cfg):
-    train_samples = load_dbpedia_samples("train", cfg.train_samples, cfg.doc_max_chars)
-    val_samples = load_dbpedia_samples("test", cfg.val_samples, cfg.doc_max_chars)
+    train_samples = load_samples("train", cfg.train_samples, cfg.doc_max_chars)
+    val_samples = load_samples("test", cfg.val_samples, cfg.doc_max_chars)
 
-    tag_texts = format_tag(cfg.tag_format)
+    tag_texts = build_tag_texts(cfg.tag_format)
 
     hard_neg_map = mine_hard_negatives(train_samples, tag_texts, cfg)
 
