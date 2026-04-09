@@ -9,15 +9,12 @@ from datasets import Dataset as HFDataset
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.cross_encoder import CrossEncoder, CrossEncoderTrainer
 from sentence_transformers.cross_encoder.evaluation import CrossEncoderRerankingEvaluator
-try:
-    from sentence_transformers.cross_encoder.training_args import CrossEncoderTrainingArguments
-except ImportError:
-    from transformers import TrainingArguments as CrossEncoderTrainingArguments
+from sentence_transformers.cross_encoder.training_args import CrossEncoderTrainingArguments
 
 from app.config import settings
 from app.services.infrastructure.dbpedia_loader import (
     load_dbpedia_ontology,
-    load_dbpedia_samples_sparql,
+    load_dbpedia_samples_ft,
 )
 
 
@@ -40,8 +37,8 @@ logger.info(f"Device: {device}")
 class FinetuneConfig:
     base_model: str = settings.RERANKER_BASE_MODEL
     output_dir: str = settings.FINETUNED_MODEL_DIR
-    train_samples: int = 50       # max samples per class for training
-    val_samples: int = 10         # max samples per class for validation
+    train_samples: int = 20
+    val_samples: int = 5
     hard_negatives: int = 3
     random_negatives: int = 1
     epochs: int = 3
@@ -54,9 +51,6 @@ class FinetuneConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     tag_format: str = "name+desc"
     doc_max_chars: int = 400
-    ontology_cache: str = "/tmp/dbpedia_ontology.json"
-    samples_train_cache: str = "/tmp/dbpedia_train_samples.json"
-    samples_val_cache: str = "/tmp/dbpedia_val_samples.json"
 
 
 @dataclass
@@ -66,13 +60,21 @@ class Sample:
     label: str
 
 
-def build_tag_texts(ontology: dict[str, str], tag_format: str) -> dict[str, str]:
-    if tag_format == "name+desc":
-        return {
-            name: f"{name}: {desc}" if desc else name
-            for name, desc in ontology.items()
-        }
-    return {name: name for name in ontology}
+def build_tag_texts(ontology, tag_format):
+    def normalize(name):
+        import re
+        return re.sub(r'(?<!^)(?=[A-Z])', ' ', name).lower()
+
+    tag_texts = {}
+    for name, desc in ontology.items():
+        readable = normalize(name)
+
+        if desc:
+            tag_texts[name] = f"{readable}. This is a type of {desc}"
+        else:
+            tag_texts[name] = f"{readable}. A DBpedia category."
+
+    return tag_texts
 
 
 def raw_to_samples(raw: list[tuple[str, str]], doc_max_chars: int) -> list[Sample]:
@@ -110,7 +112,13 @@ def mine_hard_negatives(samples, tag_texts, cfg):
             key=lambda x: x[1],
             reverse=True,
         )
-        result[sample.id] = [t for t, _ in ranked[:cfg.hard_negatives]]
+        top_k = 20
+        candidates = ranked[:top_k]
+
+        hard = candidates[:cfg.hard_negatives]
+        semi_hard = random.sample(candidates[cfg.hard_negatives:], k=1)
+
+        result[sample.id] = hard + semi_hard
 
     return result
 
@@ -133,11 +141,15 @@ def build_train_examples(samples, tag_texts, hard_neg_map, cfg) -> list[dict]:
 
 
 def build_val_examples(samples, tag_texts) -> list[dict]:
+    NEG_VAL = 50
     return [
         {
             "query": s.text,
             "positive": [tag_texts[s.label]],
-            "negative": [tag_texts[t] for t in tag_texts if t != s.label],
+            "negative": random.sample(
+                [tag_texts[t] for t in tag_texts if t != s.label],
+                min(NEG_VAL, len(tag_texts)-1)
+            )
         }
         for s in samples
     ]
@@ -149,25 +161,26 @@ def train(cfg):
     torch.manual_seed(cfg.seed)
 
     logger.info("Loading DBpedia ontology (~700 classes)...")
-    ontology = load_dbpedia_ontology(cache_path=cfg.ontology_cache)
-    logger.info(f"Ontology: {len(ontology)} classes")
+    ontology = load_dbpedia_ontology(cache_path=None)
 
     tag_texts = build_tag_texts(ontology, cfg.tag_format)
 
     logger.info("Loading training samples...")
-    train_raw = load_dbpedia_samples_sparql(
+    train_raw = load_dbpedia_samples_ft(
         ontology,
         max_per_class=cfg.train_samples,
-        cache_path=cfg.samples_train_cache,
-    )
-    logger.info("Loading validation samples...")
-    val_raw = load_dbpedia_samples_sparql(
-        ontology,
-        max_per_class=cfg.val_samples,
-        cache_path=cfg.samples_val_cache,
+        cache_path=None,
+        split="train",
     )
 
-    # Filter to classes that actually have samples
+    logger.info("Loading validation samples...")
+    val_raw = load_dbpedia_samples_ft(
+        ontology,
+        max_per_class=cfg.val_samples,
+        cache_path=None,
+        split="val",
+    )
+
     observed_labels = {label for _, label in train_raw}
     tag_texts = {k: v for k, v in tag_texts.items() if k in observed_labels}
     logger.info(f"Classes with training data: {len(tag_texts)}")
@@ -240,7 +253,4 @@ if __name__ == "__main__":
     p.add_argument("--tag_format",          choices=["name", "name+desc"], default="name+desc")
     p.add_argument("--doc_max_chars",       type=int,   default=400)
     p.add_argument("--seed",                type=int,   default=42)
-    p.add_argument("--ontology_cache",      default="/tmp/dbpedia_ontology.json")
-    p.add_argument("--samples_train_cache", default="/tmp/dbpedia_train_samples.json")
-    p.add_argument("--samples_val_cache",   default="/tmp/dbpedia_val_samples.json")
     train(FinetuneConfig(**vars(p.parse_args())))

@@ -1,136 +1,169 @@
+import bz2
+import re
 import json
 import logging
-import time
+import hashlib
 from pathlib import Path
 from typing import List, Tuple
-
-import requests
+from collections import defaultdict
 from datasets import load_dataset
-from app.services.application.tag_service import TagService
+
 from app.config import settings
+from app.db.repository import DocumentRepository, TagRepository
+from app.db.schemas import DocumentTag
+from app.services.application.tag_service import TagService
+from app.services.infrastructure.embedding import EmbeddingService
+from app.services.infrastructure.vector_store import VectorStoreService
 
 
 logger = logging.getLogger(__name__)
 
-SPARQL_ENDPOINT = "https://dbpedia.org/sparql"
-SPARQL_HEADERS = {"Accept": "application/sparql-results+json"}
+
+TRIPLE_RE = re.compile(r"<([^>]*)>\s+<([^>]*)>\s+<([^>]*)>")
 
 
-def _sparql_query(query: str, retries: int = 3, delay: float = 2.0) -> list[dict]:
-    for attempt in range(retries):
-        try:
-            r = requests.get(
-                SPARQL_ENDPOINT,
-                params={"query": query, "format": "json"},
-                headers=SPARQL_HEADERS,
-                timeout=30,
-            )
-            r.raise_for_status()
-            return r.json()["results"]["bindings"]
-        except Exception as e:
-            if attempt < retries - 1:
-                logger.warning(f"SPARQL attempt {attempt + 1} failed: {e}, retrying...")
-                time.sleep(delay)
-            else:
-                raise
+def parse_instance_types(path):
+    with bz2.open(path, "rt") as f:
+        for line in f:
+            if not line.startswith("<"):
+                continue
+            parts = line.split(" ", 3)
+            if len(parts) < 3:
+                continue
+
+            s = parts[0].strip("<>")
+            o = parts[2].strip("<>")
+
+            yield s, o
 
 
-def load_dbpedia_ontology(cache_path: str | None = None) -> dict[str, str]:
+def parse_abstracts(path):
+    with bz2.open(path, "rt") as f:
+        for line in f:
+            if not line.startswith("<"):
+                continue
+
+            try:
+                s, _, rest = line.split(" ", 2)
+                s = s.strip("<>")
+
+                start = rest.find('"')
+                end = rest.rfind('"')
+
+                if start == -1 or end == -1 or end <= start:
+                    continue
+
+                text = rest[start + 1:end]
+
+                yield s, text
+
+            except Exception:
+                continue
+
+
+def load_dbpedia_ontology(cache_path=None):
     """
-    Fetch all DBpedia ontology leaf classes with their English descriptions.
-    Returns {ClassName: description_or_empty_string}.
-    Results are cached to avoid repeated SPARQL calls.
+    Returns {class_name: description}
+    (description left empty to stay compatible)
     """
     if cache_path and Path(cache_path).exists():
-        logger.info(f"Loading ontology from cache: {cache_path}")
         return json.loads(Path(cache_path).read_text())
 
-    logger.info("Fetching DBpedia ontology from SPARQL endpoint...")
-    query = """
-        PREFIX owl:  <http://www.w3.org/2002/07/owl#>
-        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-        PREFIX dbo:  <http://dbpedia.org/ontology/>
+    logger.info("Building ontology from instance types...")
 
-        SELECT DISTINCT ?label (SAMPLE(?comment) AS ?desc) WHERE {
-          ?cls a owl:Class .
-          ?cls rdfs:label ?label .
-          FILTER(LANG(?label) = "en")
-          FILTER(STRSTARTS(STR(?cls), "http://dbpedia.org/ontology/"))
-          OPTIONAL {
-            ?cls rdfs:comment ?comment
-            FILTER(LANG(?comment) = "en")
-          }
+    class_counts = defaultdict(int)
+
+    for s, o in parse_instance_types(settings.INSTANCE_TYPES_PATH):
+        BAD_CLASSES = {
+            "Thing",
+            "owl#Thing",
+            "http://www.w3.org/2002/07/owl#Thing"
         }
-        GROUP BY ?label
-        ORDER BY ?label
-    """
-    bindings = _sparql_query(query)
+
+        if o.split("/")[-1] in BAD_CLASSES:
+            continue
+
+        class_name = o.split("/")[-1]
+        class_counts[class_name] += 1
+
+    MIN_CLASS_SIZE = 50
     ontology = {
-        b["label"]["value"]: b.get("desc", {}).get("value", "")
-        for b in bindings
-        if b.get("label", {}).get("value", "").strip()
+        cls: ""
+        for cls, cnt in class_counts.items()
+        if cnt >= MIN_CLASS_SIZE
     }
-    logger.info(f"Loaded {len(ontology)} DBpedia ontology classes.")
+
+    logger.info(f"Ontology built: {len(ontology)} classes")
 
     if cache_path:
         Path(cache_path).write_text(json.dumps(ontology, indent=2))
-        logger.info(f"Ontology cached to {cache_path}")
 
     return ontology
 
 
-def load_dbpedia_samples_sparql(
-    ontology: dict[str, str],
-    max_per_class: int = 50,
-    min_length: int = 50,
-    cache_path: str | None = None,
-) -> List[Tuple[str, str]]:
-    """
-    Fetch Wikipedia abstracts for instances of each ontology class via SPARQL.
-    Returns [(text, class_name), ...].
-    """
+def stable_bucket(x, mod=100):
+    return int(hashlib.md5(x.encode()).hexdigest(), 16) % mod
+
+
+def load_dbpedia_samples_ft(
+    ontology,
+    max_per_class=50,
+    min_length=50,
+    cache_path=None,
+    split="train",
+    val_ratio=0.1,
+):
     if cache_path and Path(cache_path).exists():
-        logger.info(f"Loading samples from cache: {cache_path}")
         return [tuple(x) for x in json.loads(Path(cache_path).read_text())]
 
-    samples = []
-    for i, class_name in enumerate(ontology):
-        query = f"""
-            PREFIX dbo: <http://dbpedia.org/ontology/>
-            PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+    logger.info("Building samples (optimized streaming version)...")
 
-            SELECT ?title ?abstract WHERE {{
-              ?entity a dbo:{class_name} .
-              ?entity rdfs:label ?title .
-              ?entity dbo:abstract ?abstract .
-              FILTER(LANG(?title) = "en")
-              FILTER(LANG(?abstract) = "en")
-              FILTER(STRLEN(?abstract) >= {min_length})
-            }}
-            LIMIT {max_per_class}
-        """
-        try:
-            bindings = _sparql_query(query)
-            for b in bindings:
-                title = b.get("title", {}).get("value", "")
-                abstract = b.get("abstract", {}).get("value", "")
-                text = f"{title}. {abstract}".strip() if title else abstract
-                if len(text) >= min_length:
-                    samples.append((text, class_name))
-            logger.info(
-                f"[{i+1}/{len(ontology)}] {class_name}: {len(bindings)} samples"
-            )
-        except Exception as e:
-            logger.warning(f"Skipping {class_name}: {e}")
-        time.sleep(0.2)
+    entity_to_class = {}
 
-    logger.info(f"Total samples: {len(samples)}")
+    # PASS 1: entity → class (streaming, cheap)
+    for s, o in parse_instance_types(settings.INSTANCE_TYPES_PATH):
+        cls = o.split("/")[-1]
+
+        if cls in ontology and cls != "owl#Thing":
+            entity_to_class[s] = cls
+
+    class_counts_train = defaultdict(int)
+    class_counts_val = defaultdict(int)
+
+    samples_train = []
+    samples_val = []
+
+    for s, text in parse_abstracts(settings.ABSTRACTS_PATH):
+
+        if len(text) < min_length:
+            continue
+
+        cls = entity_to_class.get(s)
+        if not cls:
+            continue
+
+        is_val = stable_bucket(s) < int(val_ratio * 100)
+
+        if is_val:
+            if class_counts_val[cls] >= max_per_class:
+                continue
+            class_counts_val[cls] += 1
+            samples_val.append((text, cls))
+        else:
+            if class_counts_train[cls] >= max_per_class:
+                continue
+            class_counts_train[cls] += 1
+            samples_train.append((text, cls))
+
+    logger.info(f"train samples: {len(samples_train)}")
+    logger.info(f"val samples: {len(samples_val)}")
+
+    result = samples_train if split == "train" else samples_val
 
     if cache_path:
-        Path(cache_path).write_text(json.dumps(samples, indent=2))
-        logger.info(f"Samples cached to {cache_path}")
+        Path(cache_path).write_text(json.dumps(result, indent=2))
 
-    return samples
+    return result
 
 
 def load_dbpedia_samples(
@@ -197,10 +230,6 @@ async def seed_dbpedia_tags(db_session):
 
 async def seed_dbpedia_documents(db_session, max_per_class: int = 10):
     """Seed a sample of DBpedia documents with ground-truth tag assignments."""
-    from app.db.repository import DocumentRepository, TagRepository
-    from app.db.schemas import DocumentTag
-    from app.services.infrastructure.embedding import EmbeddingService
-    from app.services.infrastructure.vector_store import VectorStoreService
 
     samples = load_dbpedia_samples(split="test", max_per_class=max_per_class)
     if not samples:

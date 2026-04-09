@@ -1,6 +1,8 @@
 import logging
 from pydantic_settings import BaseSettings
 
+from pathlib import Path, PosixPath
+
 
 class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://tagging:tagging@postgres:5432/tagging"
@@ -48,6 +50,12 @@ class Settings(BaseSettings):
     }
     RERANKER_BASE_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     FINETUNED_MODEL_DIR: str = "/models/cross_encoder_dbpedia"
+
+    BASE_DIR: PosixPath = Path(__file__).resolve().parents[1]
+    DATA_DIR: PosixPath = BASE_DIR / "data"
+
+    INSTANCE_TYPES_PATH: PosixPath = DATA_DIR / "instance_types_en.ttl.bz2"
+    ABSTRACTS_PATH: PosixPath = DATA_DIR / "long_abstracts_en.ttl.bz2"
 
 
 settings = Settings()
