@@ -218,6 +218,7 @@ def finetune(cfg):
         seed=cfg.seed,
 
         save_strategy="best",
+        metric_for_best_model="val_map",
         logging_steps=50,
     )
 
