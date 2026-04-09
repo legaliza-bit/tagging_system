@@ -1,11 +1,136 @@
+import json
 import logging
+import time
+from pathlib import Path
 from typing import List, Tuple
+
+import requests
 from datasets import load_dataset
 from app.services.application.tag_service import TagService
 from app.config import settings
 
 
 logger = logging.getLogger(__name__)
+
+SPARQL_ENDPOINT = "https://dbpedia.org/sparql"
+SPARQL_HEADERS = {"Accept": "application/sparql-results+json"}
+
+
+def _sparql_query(query: str, retries: int = 3, delay: float = 2.0) -> list[dict]:
+    for attempt in range(retries):
+        try:
+            r = requests.get(
+                SPARQL_ENDPOINT,
+                params={"query": query, "format": "json"},
+                headers=SPARQL_HEADERS,
+                timeout=30,
+            )
+            r.raise_for_status()
+            return r.json()["results"]["bindings"]
+        except Exception as e:
+            if attempt < retries - 1:
+                logger.warning(f"SPARQL attempt {attempt + 1} failed: {e}, retrying...")
+                time.sleep(delay)
+            else:
+                raise
+
+
+def load_dbpedia_ontology(cache_path: str | None = None) -> dict[str, str]:
+    """
+    Fetch all DBpedia ontology leaf classes with their English descriptions.
+    Returns {ClassName: description_or_empty_string}.
+    Results are cached to avoid repeated SPARQL calls.
+    """
+    if cache_path and Path(cache_path).exists():
+        logger.info(f"Loading ontology from cache: {cache_path}")
+        return json.loads(Path(cache_path).read_text())
+
+    logger.info("Fetching DBpedia ontology from SPARQL endpoint...")
+    query = """
+        PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+        PREFIX dbo:  <http://dbpedia.org/ontology/>
+
+        SELECT DISTINCT ?label (SAMPLE(?comment) AS ?desc) WHERE {
+          ?cls a owl:Class .
+          ?cls rdfs:label ?label .
+          FILTER(LANG(?label) = "en")
+          FILTER(STRSTARTS(STR(?cls), "http://dbpedia.org/ontology/"))
+          OPTIONAL {
+            ?cls rdfs:comment ?comment
+            FILTER(LANG(?comment) = "en")
+          }
+        }
+        GROUP BY ?label
+        ORDER BY ?label
+    """
+    bindings = _sparql_query(query)
+    ontology = {
+        b["label"]["value"]: b.get("desc", {}).get("value", "")
+        for b in bindings
+        if b.get("label", {}).get("value", "").strip()
+    }
+    logger.info(f"Loaded {len(ontology)} DBpedia ontology classes.")
+
+    if cache_path:
+        Path(cache_path).write_text(json.dumps(ontology, indent=2))
+        logger.info(f"Ontology cached to {cache_path}")
+
+    return ontology
+
+
+def load_dbpedia_samples_sparql(
+    ontology: dict[str, str],
+    max_per_class: int = 50,
+    min_length: int = 50,
+    cache_path: str | None = None,
+) -> List[Tuple[str, str]]:
+    """
+    Fetch Wikipedia abstracts for instances of each ontology class via SPARQL.
+    Returns [(text, class_name), ...].
+    """
+    if cache_path and Path(cache_path).exists():
+        logger.info(f"Loading samples from cache: {cache_path}")
+        return [tuple(x) for x in json.loads(Path(cache_path).read_text())]
+
+    samples = []
+    for i, class_name in enumerate(ontology):
+        query = f"""
+            PREFIX dbo: <http://dbpedia.org/ontology/>
+            PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+            SELECT ?title ?abstract WHERE {{
+              ?entity a dbo:{class_name} .
+              ?entity rdfs:label ?title .
+              ?entity dbo:abstract ?abstract .
+              FILTER(LANG(?title) = "en")
+              FILTER(LANG(?abstract) = "en")
+              FILTER(STRLEN(?abstract) >= {min_length})
+            }}
+            LIMIT {max_per_class}
+        """
+        try:
+            bindings = _sparql_query(query)
+            for b in bindings:
+                title = b.get("title", {}).get("value", "")
+                abstract = b.get("abstract", {}).get("value", "")
+                text = f"{title}. {abstract}".strip() if title else abstract
+                if len(text) >= min_length:
+                    samples.append((text, class_name))
+            logger.info(
+                f"[{i+1}/{len(ontology)}] {class_name}: {len(bindings)} samples"
+            )
+        except Exception as e:
+            logger.warning(f"Skipping {class_name}: {e}")
+        time.sleep(0.2)
+
+    logger.info(f"Total samples: {len(samples)}")
+
+    if cache_path:
+        Path(cache_path).write_text(json.dumps(samples, indent=2))
+        logger.info(f"Samples cached to {cache_path}")
+
+    return samples
 
 
 def load_dbpedia_samples(
@@ -92,7 +217,6 @@ async def seed_dbpedia_documents(db_session, max_per_class: int = 10):
     embedder = EmbeddingService.get_instance()
     vector_store = VectorStoreService.get_instance()
 
-    # Build tag name -> tag object map
     tag_map = {}
     for name in settings.DBPEDIA_CLASSES:
         tag = await tag_repo.get_by_name(name)

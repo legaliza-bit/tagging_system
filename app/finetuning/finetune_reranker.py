@@ -11,7 +11,10 @@ from sentence_transformers.cross_encoder.evaluation import CERerankingEvaluator
 from torch.utils.data import DataLoader
 
 from app.config import settings
-from app.services.infrastructure.dbpedia_loader import load_dbpedia_samples
+from app.services.infrastructure.dbpedia_loader import (
+    load_dbpedia_ontology,
+    load_dbpedia_samples_sparql,
+)
 
 
 for handler in logging.root.handlers[:]:
@@ -33,8 +36,8 @@ logger.info(f"Device: {device}")
 class FinetuneConfig:
     base_model: str = settings.RERANKER_BASE_MODEL
     output_dir: str = settings.FINETUNED_MODEL_DIR
-    train_samples: int = 5_000
-    val_samples: int = 500
+    train_samples: int = 50       # max samples per class for training
+    val_samples: int = 10         # max samples per class for validation
     hard_negatives: int = 3
     random_negatives: int = 1
     epochs: int = 3
@@ -47,6 +50,9 @@ class FinetuneConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     tag_format: str = "name+desc"
     doc_max_chars: int = 400
+    ontology_cache: str = "/tmp/dbpedia_ontology.json"
+    samples_train_cache: str = "/tmp/dbpedia_train_samples.json"
+    samples_val_cache: str = "/tmp/dbpedia_val_samples.json"
 
 
 @dataclass
@@ -56,39 +62,31 @@ class Sample:
     label: str
 
 
-def format_tag(name: str, tag_format: str) -> str:
+def build_tag_texts(ontology: dict[str, str], tag_format: str) -> dict[str, str]:
     if tag_format == "name+desc":
-        desc = settings.DBPEDIA_DESCRIPTIONS.get(name, "")
-        return f"{name}: {desc}" if desc else name
-    return name
+        return {
+            name: f"{name}: {desc}" if desc else name
+            for name, desc in ontology.items()
+        }
+    return {name: name for name in ontology}
 
 
-def build_tag_texts(tag_format: str):
-    return {
-        t: format_tag(t, tag_format)
-        for t in settings.DBPEDIA_CLASSES
-    }
-
-
-def load_samples(split: str, max_per_class: int, doc_max_chars: int) -> list[Sample]:
-    raw = load_dbpedia_samples(split, max_per_class)
+def raw_to_samples(raw: list[tuple[str, str]], doc_max_chars: int) -> list[Sample]:
     return [
-        Sample(
-            id=i,
-            text=text[:doc_max_chars],
-            label=label
-        )
+        Sample(id=i, text=text[:doc_max_chars], label=label)
         for i, (text, label) in enumerate(raw)
     ]
 
 
 def mine_hard_negatives(samples, tag_texts, cfg):
-    model = SentenceTransformer(settings.EMBEDDING_MODEL, device=device)
+    model = SentenceTransformer(settings.EMBEDDING_MODEL, device=cfg.device)
 
     tag_names = list(tag_texts.keys())
     tag_embs = model.encode(
         [tag_texts[t] for t in tag_names],
-        normalize_embeddings=True
+        normalize_embeddings=True,
+        batch_size=256,
+        show_progress_bar=True,
     )
 
     texts = [s.text for s in samples]
@@ -97,10 +95,8 @@ def mine_hard_negatives(samples, tag_texts, cfg):
     )
 
     result = {}
-
     for idx, sample in enumerate(samples):
         sims = doc_embs[idx] @ tag_embs.T
-
         ranked = sorted(
             [
                 (tag_names[j], float(sims[j]))
@@ -108,9 +104,8 @@ def mine_hard_negatives(samples, tag_texts, cfg):
                 if tag_names[j] != sample.label
             ],
             key=lambda x: x[1],
-            reverse=True
+            reverse=True,
         )
-
         result[sample.id] = [t for t, _ in ranked[:cfg.hard_negatives]]
 
     return result
@@ -121,20 +116,15 @@ def build_train_examples(samples, tag_texts, hard_neg_map, cfg):
     examples = []
 
     for s in samples:
-        # positive
         examples.append(InputExample(
             texts=[s.text, tag_texts[s.label]],
             label=1.0
         ))
-
-        # hard negatives
         for neg in hard_neg_map.get(s.id, []):
             examples.append(InputExample(
                 texts=[s.text, tag_texts[neg]],
                 label=0.0
             ))
-
-        # random negatives
         other = [t for t in tag_texts if t != s.label]
         for neg in rng.sample(other, min(cfg.random_negatives, len(other))):
             examples.append(InputExample(
@@ -151,10 +141,7 @@ def build_val_examples(samples, tag_texts):
         {
             "query": s.text,
             "positive": [tag_texts[s.label]],
-            "negative": [
-                tag_texts[t]
-                for t in tag_texts if t != s.label
-            ],
+            "negative": [tag_texts[t] for t in tag_texts if t != s.label],
         }
         for s in samples
     ]
@@ -165,18 +152,42 @@ def train(cfg):
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
 
-    train_samples = load_samples("train", cfg.train_samples, cfg.doc_max_chars)
-    val_samples = load_samples("test", cfg.val_samples, cfg.doc_max_chars)
+    logger.info("Loading DBpedia ontology (~700 classes)...")
+    ontology = load_dbpedia_ontology(cache_path=cfg.ontology_cache)
+    logger.info(f"Ontology: {len(ontology)} classes")
 
-    tag_texts = build_tag_texts(cfg.tag_format)
+    tag_texts = build_tag_texts(ontology, cfg.tag_format)
 
-    hard_neg_map = mine_hard_negatives(train_samples, tag_texts, cfg)
-
-    train_examples = build_train_examples(
-        train_samples, tag_texts, hard_neg_map, cfg
+    logger.info("Loading training samples...")
+    train_raw = load_dbpedia_samples_sparql(
+        ontology,
+        max_per_class=cfg.train_samples,
+        cache_path=cfg.samples_train_cache,
+    )
+    logger.info("Loading validation samples...")
+    val_raw = load_dbpedia_samples_sparql(
+        ontology,
+        max_per_class=cfg.val_samples,
+        cache_path=cfg.samples_val_cache,
     )
 
+    # Filter to classes that actually have samples
+    observed_labels = {label for _, label in train_raw}
+    tag_texts = {k: v for k, v in tag_texts.items() if k in observed_labels}
+    logger.info(f"Classes with training data: {len(tag_texts)}")
+
+    train_samples = raw_to_samples(train_raw, cfg.doc_max_chars)
+    val_samples = raw_to_samples(val_raw, cfg.doc_max_chars)
+
+    logger.info(f"Train: {len(train_samples)} samples, Val: {len(val_samples)} samples")
+
+    logger.info("Mining hard negatives...")
+    hard_neg_map = mine_hard_negatives(train_samples, tag_texts, cfg)
+
+    train_examples = build_train_examples(train_samples, tag_texts, hard_neg_map, cfg)
     val_examples = build_val_examples(val_samples, tag_texts)
+
+    logger.info(f"Training pairs: {len(train_examples)}")
 
     model = CrossEncoder(
         cfg.base_model,
@@ -186,7 +197,6 @@ def train(cfg):
     )
 
     loader = DataLoader(train_examples, batch_size=cfg.batch_size, shuffle=True)
-
     evaluator = CERerankingEvaluator(val_examples)
 
     model.fit(
@@ -197,24 +207,31 @@ def train(cfg):
         optimizer_params={"lr": cfg.learning_rate, "weight_decay": cfg.weight_decay},
         max_grad_norm=1.0,
         output_path=cfg.output_dir,
+        save_best_model=True,
     )
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Fine-tune cross-encoder on DBpedia.")
-    p.add_argument("--base_model",       default=settings.RERANKER_BASE_MODEL)
-    p.add_argument("--output_dir",       default=settings.FINETUNED_MODEL_DIR)
-    p.add_argument("--train_samples",    type=int,   default=5_000)
-    p.add_argument("--val_samples",      type=int,   default=500)
-    p.add_argument("--hard_negatives",   type=int,   default=3)
-    p.add_argument("--random_negatives", type=int,   default=1)
-    p.add_argument("--epochs",           type=int,   default=3)
-    p.add_argument("--batch_size",       type=int,   default=32)
-    p.add_argument("--max_length",       type=int,   default=256)
-    p.add_argument("--learning_rate",    type=float, default=2e-5)
-    p.add_argument("--weight_decay",     type=float, default=0.01)
-    p.add_argument("--warmup_ratio",     type=float, default=0.10)
-    p.add_argument("--tag_format",       choices=["name", "name+desc"], default="name+desc")
-    p.add_argument("--doc_max_chars",    type=int,   default=400)
-    p.add_argument("--seed",             type=int,   default=42)
+    p = argparse.ArgumentParser(
+        description="Fine-tune cross-encoder on full DBpedia ontology."
+    )
+    p.add_argument("--base_model",          default=settings.RERANKER_BASE_MODEL)
+    p.add_argument("--output_dir",          default=settings.FINETUNED_MODEL_DIR)
+    p.add_argument("--train_samples",       type=int,   default=50)
+    p.add_argument("--val_samples",         type=int,   default=10)
+    p.add_argument("--hard_negatives",      type=int,   default=3)
+    p.add_argument("--random_negatives",    type=int,   default=1)
+    p.add_argument("--epochs",              type=int,   default=3)
+    p.add_argument("--batch_size",          type=int,   default=32)
+    p.add_argument("--max_length",          type=int,   default=256)
+    p.add_argument("--learning_rate",       type=float, default=2e-5)
+    p.add_argument("--weight_decay",        type=float, default=0.01)
+    p.add_argument("--warmup_ratio",        type=float, default=0.10)
+    p.add_argument("--tag_format",          choices=["name", "name+desc"], default="name+desc")
+    p.add_argument("--doc_max_chars",       type=int,   default=400)
+    p.add_argument("--seed",                type=int,   default=42)
+    p.add_argument("--ontology_cache",      default="/tmp/dbpedia_ontology.json")
+    p.add_argument("--samples_train_cache", default="/tmp/dbpedia_train_samples.json")
+    p.add_argument("--samples_val_cache",   default="/tmp/dbpedia_val_samples.json")
     train(FinetuneConfig(**vars(p.parse_args())))
+
