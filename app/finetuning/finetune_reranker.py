@@ -1,10 +1,7 @@
 import argparse
-import json
 import logging
 import random
-from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Dict, List, Tuple
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -47,7 +44,7 @@ class FinetuneConfig:
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     seed: int = 42
-    device: str = "cpu"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
     tag_format: str = "name+desc"
     doc_max_chars: int = 400
 
@@ -73,8 +70,8 @@ def build_tag_texts(tag_format: str):
     }
 
 
-def load_samples(split: str, n: int, doc_max_chars: int) -> list[Sample]:
-    raw = load_dbpedia_samples(split, n)
+def load_samples(split: str, max_per_class: int, doc_max_chars: int) -> list[Sample]:
+    raw = load_dbpedia_samples(split, max_per_class)
     return [
         Sample(
             id=i,
@@ -94,17 +91,21 @@ def mine_hard_negatives(samples, tag_texts, cfg):
         normalize_embeddings=True
     )
 
+    texts = [s.text for s in samples]
+    doc_embs = model.encode(
+        texts, normalize_embeddings=True, batch_size=128, show_progress_bar=True
+    )
+
     result = {}
 
-    for sample in samples:
-        doc_emb = model.encode(sample.text, normalize_embeddings=True)
-        sims = doc_emb @ tag_embs.T
+    for idx, sample in enumerate(samples):
+        sims = doc_embs[idx] @ tag_embs.T
 
         ranked = sorted(
             [
-                (tag_names[i], float(sims[i]))
-                for i in range(len(tag_names))
-                if tag_names[i] != sample.label
+                (tag_names[j], float(sims[j]))
+                for j in range(len(tag_names))
+                if tag_names[j] != sample.label
             ],
             key=lambda x: x[1],
             reverse=True
@@ -160,6 +161,10 @@ def build_val_examples(samples, tag_texts):
 
 
 def train(cfg):
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
+
     train_samples = load_samples("train", cfg.train_samples, cfg.doc_max_chars)
     val_samples = load_samples("test", cfg.val_samples, cfg.doc_max_chars)
 
@@ -177,7 +182,7 @@ def train(cfg):
         cfg.base_model,
         num_labels=1,
         max_length=cfg.max_length,
-        device=device,
+        device=cfg.device,
     )
 
     loader = DataLoader(train_examples, batch_size=cfg.batch_size, shuffle=True)
@@ -189,7 +194,7 @@ def train(cfg):
         evaluator=evaluator,
         epochs=cfg.epochs,
         warmup_steps=int(len(loader) * cfg.epochs * cfg.warmup_ratio),
-        optimizer_params={"lr": cfg.learning_rate},
+        optimizer_params={"lr": cfg.learning_rate, "weight_decay": cfg.weight_decay},
         max_grad_norm=1.0,
         output_path=cfg.output_dir,
     )
