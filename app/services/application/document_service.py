@@ -46,6 +46,14 @@ class DocumentService:
                 embedding = self.embedder.embed_one(doc.content[:500])
                 scored = await self.tag_retrieval.retrieve(doc.content, embedding)
                 best_score = scored[0][1] if scored else 0
+                tag_score = next((s for t, s in scored if t.id == tag_id), None)
+                if tag_score is None:
+                    logger.debug(f"Doc {doc.id}: '{tag_name}' not in top-K candidates")
+                else:
+                    logger.debug(
+                        f"Doc {doc.id}: '{tag_name}' score={tag_score:.3f} "
+                        f"best={best_score:.3f} threshold={settings.TAG_ASSIGNMENT_THRESHOLD}"
+                    )
                 for tag, score in scored:
                     if (
                         tag.id == tag_id

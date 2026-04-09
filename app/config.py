@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     }
     RERANKER_BASE_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     FINETUNED_MODEL_DIR: str = "/models/cross_encoder_dbpedia"
+    FINETUNED_MODEL_REPO: str = "legaliza-bit/cross-encoder-dbpedia"
 
     BASE_DIR: PosixPath = Path(__file__).resolve().parents[1]
     DATA_DIR: PosixPath = BASE_DIR / "data"

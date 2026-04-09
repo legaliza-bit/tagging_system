@@ -1,5 +1,4 @@
 import logging
-import math
 from typing import List, Tuple
 
 from app.config import settings
@@ -32,16 +31,10 @@ class TagRetrievalService:
         if not db_tags:
             return []
 
-        tag_texts = [
-            f"{t.name}: {t.description}" if t.description else t.name
-            for t in db_tags
-        ]
-        reranked = self.reranker.rerank_tags_for_document(text, tag_texts)
+        tag_names = [t.name for t in db_tags]
+        reranked = self.reranker.rerank_tags_for_document(text, tag_names)
 
-        name_to_tag = {
-            (f"{t.name}: {t.description}" if t.description else t.name): t
-            for t in db_tags
-        }
+        name_to_tag = {t.name: t for t in db_tags}
 
         # Base score fusion
         scored = []

@@ -1,5 +1,5 @@
-import json
 import logging
+import re
 from pathlib import Path
 from typing import List, Tuple
 
@@ -30,25 +30,20 @@ class RerankerService:
     def _load_model(self) -> Tuple[CrossEncoder, dict]:
         ft_path = Path(settings.FINETUNED_MODEL_DIR)
         if ft_path.exists() and any(ft_path.iterdir()):
-            meta_file = ft_path / "finetune_meta.json"
-            meta = json.loads(meta_file.read_text()) if meta_file.exists() else {}
             logger.info(f"Loading fine-tuned cross-encoder from {ft_path}")
-            return CrossEncoder(str(ft_path), max_length=meta.get("max_length", 256)), meta
+            return CrossEncoder(str(ft_path), max_length=256), {}
         logger.info(
-            f"No fine-tuned model at {ft_path}, "
-            f"falling back to base model: {settings.RERANKER_BASE_MODEL}"
+            f"No local model at {ft_path}, "
+            f"loading from HuggingFace: {settings.FINETUNED_MODEL_REPO}"
         )
-        return CrossEncoder(settings.RERANKER_BASE_MODEL), {}
+        return CrossEncoder(settings.FINETUNED_MODEL_REPO, max_length=256), {}
 
     def _fmt_doc(self, text: str) -> str:
         return text[:self._meta.get("doc_max_chars", 400)]
 
     def _fmt_tag(self, name: str) -> str:
-        if self._meta.get("tag_format", "name+desc") == "name+desc":
-            descs = self._meta.get("dbpedia_descriptions", {})
-            desc = descs.get(name, "")
-            return f"{name}: {desc}" if desc else name
-        return name
+        readable = re.sub(r'(?<!^)(?=[A-Z])', ' ', name).lower()
+        return f"{readable}. A DBpedia category."
 
     @staticmethod
     def _sigmoid(logits) -> np.ndarray:

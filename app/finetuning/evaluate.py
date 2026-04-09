@@ -45,18 +45,11 @@ logger.info(f"Device: {device}")
 
 
 def build_tag_texts(ontology: dict[str, str]) -> dict[str, str]:
-    """Same format as finetune_reranker.py so evaluation is consistent with training."""
-    def normalize(name: str) -> str:
-        return re.sub(r'(?<!^)(?=[A-Z])', ' ', name).lower()
-
-    tag_texts = {}
-    for name, desc in ontology.items():
-        readable = normalize(name)
-        if desc:
-            tag_texts[name] = f"{readable}. This is a type of {desc}"
-        else:
-            tag_texts[name] = f"{readable}. A DBpedia category."
-    return tag_texts
+    """Match the inference format in reranker._fmt_tag."""
+    return {
+        name: f"{re.sub(r'(?<!^)(?=[A-Z])', ' ', name).lower()}. A DBpedia category."
+        for name in ontology
+    }
 
 
 def eval_baseline(

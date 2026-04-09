@@ -68,4 +68,5 @@ cpu = [
 finetuning = [
     "torch",
     "torchvision",
+    "huggingface-hub[cli]>=0.23.0",
 ]
