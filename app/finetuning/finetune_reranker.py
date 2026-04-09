@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -12,11 +13,23 @@ from sentence_transformers.cross_encoder import CrossEncoder
 from sentence_transformers.cross_encoder.evaluation import CERerankingEvaluator
 from torch.utils.data import DataLoader
 
-from app.config import settings, logger
+from app.config import settings
 from app.services.infrastructure.dbpedia_loader import load_dbpedia_samples
 
 
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    force=True,
+)
+logger = logging.getLogger(__name__)
+
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+logger.info(f"Device: {device}")
 
 
 @dataclass
