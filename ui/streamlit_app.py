@@ -64,12 +64,6 @@ page = st.sidebar.radio(
     ],
 )
 
-stats = get("/documents/stats/summary")
-if stats:
-    st.sidebar.divider()
-    st.sidebar.metric("Documents", stats.get("documents", 0))
-    st.sidebar.metric("Tags", stats.get("tags", 0))
-
 
 if page == "Dashboard":
     st.title("📊 Dashboard")

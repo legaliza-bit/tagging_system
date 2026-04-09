@@ -209,14 +209,15 @@ def finetune(cfg):
         output_dir=cfg.output_dir,
         num_train_epochs=cfg.epochs,
         per_device_train_batch_size=cfg.batch_size,
-        warmup_ratio=cfg.warmup_ratio,
+
         learning_rate=cfg.learning_rate,
         weight_decay=cfg.weight_decay,
         max_grad_norm=1.0,
+
         fp16=cfg.device == "cuda",
         seed=cfg.seed,
-        save_strategy="epoch",
-        load_best_model_at_end=True,
+
+        save_strategy="best",
         logging_steps=50,
     )
 
