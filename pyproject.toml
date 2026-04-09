@@ -55,11 +55,17 @@ torch = [
     { index = "pytorch-cu126", group = "finetuning" },
     { index = "pytorch-cpu", group = "cpu" },
 ]
+torchvision = [
+    { index = "pytorch-cu126", group = "finetuning" },
+    { index = "pytorch-cpu", group = "cpu" },
+]
 
 [dependency-groups]
 cpu = [
     "torch>=2.11.0",
+    "torchvision",
 ]
 finetuning = [
     "torch",
+    "torchvision",
 ]
