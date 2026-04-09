@@ -14,7 +14,9 @@ from sentence_transformers.cross_encoder.training_args import CrossEncoderTraini
 from app.config import settings
 from app.services.infrastructure.dbpedia_loader import (
     load_dbpedia_ontology,
-    load_dbpedia_samples_ft,
+    build_dataset,
+    split_dataset,
+    sample_per_class
 )
 
 
@@ -115,8 +117,10 @@ def mine_hard_negatives(samples, tag_texts, cfg):
         top_k = 20
         candidates = ranked[:top_k]
 
-        hard = candidates[:cfg.hard_negatives]
-        semi_hard = random.sample(candidates[cfg.hard_negatives:], k=1)
+        hard = [t for t, _ in candidates[:cfg.hard_negatives]]
+
+        semi_pool = candidates[cfg.hard_negatives:]
+        semi_hard = [random.choice(semi_pool)[0]] if semi_pool else []
 
         result[sample.id] = hard + semi_hard
 
@@ -155,7 +159,7 @@ def build_val_examples(samples, tag_texts) -> list[dict]:
     ]
 
 
-def train(cfg):
+def finetune(cfg):
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
@@ -165,21 +169,14 @@ def train(cfg):
 
     tag_texts = build_tag_texts(ontology, cfg.tag_format)
 
-    logger.info("Loading training samples...")
-    train_raw = load_dbpedia_samples_ft(
-        ontology,
-        max_per_class=cfg.train_samples,
-        cache_path=None,
-        split="train",
-    )
+    logger.info("Loading dataset...")
 
-    logger.info("Loading validation samples...")
-    val_raw = load_dbpedia_samples_ft(
-        ontology,
-        max_per_class=cfg.val_samples,
-        cache_path=None,
-        split="val",
-    )
+    dataset = build_dataset(ontology, min_length=20)
+
+    train, val = split_dataset(dataset, val_ratio=0.1)
+
+    train_raw = sample_per_class(train, max_per_class=cfg.train_samples)
+    val_raw = sample_per_class(val, max_per_class=cfg.train_samples)
 
     observed_labels = {label for _, label in train_raw}
     tag_texts = {k: v for k, v in tag_texts.items() if k in observed_labels}
@@ -254,4 +251,4 @@ if __name__ == "__main__":
     p.add_argument("--tag_format",          choices=["name", "name+desc"], default="name+desc")
     p.add_argument("--doc_max_chars",       type=int,   default=400)
     p.add_argument("--seed",                type=int,   default=42)
-    train(FinetuneConfig(**vars(p.parse_args())))
+    finetune(FinetuneConfig(**vars(p.parse_args())))

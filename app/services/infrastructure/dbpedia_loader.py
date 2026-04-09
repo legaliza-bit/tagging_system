@@ -101,40 +101,22 @@ def load_dbpedia_ontology(cache_path=None):
     return ontology
 
 
-def stable_bucket(x, mod=100):
-    return int(hashlib.md5(x.encode()).hexdigest(), 16) % mod
+def is_val_entity(entity_id, val_ratio):
+    h = int(hashlib.md5(entity_id.encode()).hexdigest(), 16)
+    return (h % 100) < int(val_ratio * 100)
 
 
-def load_dbpedia_samples_ft(
-    ontology,
-    max_per_class=50,
-    min_length=50,
-    cache_path=None,
-    split="train",
-    val_ratio=0.1,
-):
-    if cache_path and Path(cache_path).exists():
-        return [tuple(x) for x in json.loads(Path(cache_path).read_text())]
-
-    logger.info("Building samples (optimized streaming version)...")
-
+def build_dataset(ontology, min_length):
     entity_to_class = {}
 
-    # PASS 1: entity → class (streaming, cheap)
     for s, o in parse_instance_types(settings.INSTANCE_TYPES_PATH):
         cls = o.split("/")[-1]
-
         if cls in ontology and cls != "owl#Thing":
             entity_to_class[s] = cls
 
-    class_counts_train = defaultdict(int)
-    class_counts_val = defaultdict(int)
-
-    samples_train = []
-    samples_val = []
+    dataset = []
 
     for s, text in parse_abstracts(settings.ABSTRACTS_PATH):
-
         if len(text) < min_length:
             continue
 
@@ -142,28 +124,94 @@ def load_dbpedia_samples_ft(
         if not cls:
             continue
 
-        is_val = stable_bucket(s) < int(val_ratio * 100)
+        dataset.append((s, text, cls))
 
-        if is_val:
-            if class_counts_val[cls] >= max_per_class:
-                continue
-            class_counts_val[cls] += 1
-            samples_val.append((text, cls))
+    return dataset
+
+
+def split_dataset(dataset, val_ratio):
+    train, val = [], []
+
+    for s, text, cls in dataset:
+        if is_val_entity(s, val_ratio):
+            val.append((text, cls))
         else:
-            if class_counts_train[cls] >= max_per_class:
-                continue
-            class_counts_train[cls] += 1
-            samples_train.append((text, cls))
+            train.append((text, cls))
 
-    logger.info(f"train samples: {len(samples_train)}")
-    logger.info(f"val samples: {len(samples_val)}")
+    return train, val
 
-    result = samples_train if split == "train" else samples_val
 
-    if cache_path:
-        Path(cache_path).write_text(json.dumps(result, indent=2))
+def sample_per_class(data, max_per_class):
+    counts = defaultdict(int)
+    result = []
+
+    for text, cls in data:
+        if counts[cls] >= max_per_class:
+            continue
+        counts[cls] += 1
+        result.append((text, cls))
 
     return result
+
+# def load_dbpedia_samples_ft(
+#     ontology,
+#     max_per_class=50,
+#     min_length=50,
+#     cache_path=None,
+#     split="train",
+#     val_ratio=0.1,
+# ):
+#     if cache_path and Path(cache_path).exists():
+#         return [tuple(x) for x in json.loads(Path(cache_path).read_text())]
+
+#     logger.info("Building samples (optimized streaming version)...")
+
+#     entity_to_class = {}
+
+#     # PASS 1: entity → class (streaming, cheap)
+#     for s, o in parse_instance_types(settings.INSTANCE_TYPES_PATH):
+#         cls = o.split("/")[-1]
+
+#         if cls in ontology and cls != "owl#Thing":
+#             entity_to_class[s] = cls
+
+#     class_counts_train = defaultdict(int)
+#     class_counts_val = defaultdict(int)
+
+#     samples_train = []
+#     samples_val = []
+
+#     for s, text in parse_abstracts(settings.ABSTRACTS_PATH):
+
+#         if len(text) < min_length:
+#             continue
+
+#         cls = entity_to_class.get(s)
+#         if not cls:
+#             continue
+
+#         is_val = stable_bucket(s) < int(val_ratio * 100)
+
+#         if is_val:
+#             if class_counts_val[cls] >= max_per_class:
+#                 continue
+#             class_counts_val[cls] += 1
+#             samples_val.append((text, cls))
+#         else:
+#             if class_counts_train[cls] >= max_per_class:
+#                 continue
+#             class_counts_train[cls] += 1
+#             samples_train.append((text, cls))
+
+#     logger.info(f"train samples: {len(samples_train)}")
+#     logger.info(f"val samples: {len(samples_val)}")
+
+#     result = samples_train if split == "train" else samples_val
+
+#     if cache_path:
+#         Path(cache_path).write_text(json.dumps(result, indent=2))
+
+#     return result
 
 
 def load_dbpedia_samples(
