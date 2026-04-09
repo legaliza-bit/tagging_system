@@ -14,7 +14,7 @@ ENV TORCH_HOME=/app/.cache/torch
 ENV HF_TOKEN=""
 
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen
+RUN uv sync --frozen --group cpu
 
 COPY app/ ./app/
 
