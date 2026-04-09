@@ -5,10 +5,14 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from sentence_transformers import InputExample, SentenceTransformer
-from sentence_transformers.cross_encoder import CrossEncoder
-from sentence_transformers.cross_encoder.evaluation import CERerankingEvaluator
-from torch.utils.data import DataLoader
+from datasets import Dataset as HFDataset
+from sentence_transformers import SentenceTransformer
+from sentence_transformers.cross_encoder import CrossEncoder, CrossEncoderTrainer
+from sentence_transformers.cross_encoder.evaluation import CrossEncoderRerankingEvaluator
+try:
+    from sentence_transformers.cross_encoder.training_args import CrossEncoderTrainingArguments
+except ImportError:
+    from transformers import TrainingArguments as CrossEncoderTrainingArguments
 
 from app.config import settings
 from app.services.infrastructure.dbpedia_loader import (
@@ -111,32 +115,24 @@ def mine_hard_negatives(samples, tag_texts, cfg):
     return result
 
 
-def build_train_examples(samples, tag_texts, hard_neg_map, cfg):
+def build_train_examples(samples, tag_texts, hard_neg_map, cfg) -> list[dict]:
+    """Return list of {sentence1, sentence2, label} dicts for HFDataset."""
     rng = random.Random(cfg.seed)
     examples = []
 
     for s in samples:
-        examples.append(InputExample(
-            texts=[s.text, tag_texts[s.label]],
-            label=1.0
-        ))
+        examples.append({"sentence1": s.text, "sentence2": tag_texts[s.label], "label": 1.0})
         for neg in hard_neg_map.get(s.id, []):
-            examples.append(InputExample(
-                texts=[s.text, tag_texts[neg]],
-                label=0.0
-            ))
+            examples.append({"sentence1": s.text, "sentence2": tag_texts[neg], "label": 0.0})
         other = [t for t in tag_texts if t != s.label]
         for neg in rng.sample(other, min(cfg.random_negatives, len(other))):
-            examples.append(InputExample(
-                texts=[s.text, tag_texts[neg]],
-                label=0.0
-            ))
+            examples.append({"sentence1": s.text, "sentence2": tag_texts[neg], "label": 0.0})
 
     rng.shuffle(examples)
     return examples
 
 
-def build_val_examples(samples, tag_texts):
+def build_val_examples(samples, tag_texts) -> list[dict]:
     return [
         {
             "query": s.text,
@@ -196,19 +192,33 @@ def train(cfg):
         device=cfg.device,
     )
 
-    loader = DataLoader(train_examples, batch_size=cfg.batch_size, shuffle=True)
-    evaluator = CERerankingEvaluator(val_examples)
+    train_dataset = HFDataset.from_list(train_examples)
+    evaluator = CrossEncoderRerankingEvaluator(val_examples, name="val")
 
-    model.fit(
-        train_dataloader=loader,
-        evaluator=evaluator,
-        epochs=cfg.epochs,
-        warmup_steps=int(len(loader) * cfg.epochs * cfg.warmup_ratio),
-        optimizer_params={"lr": cfg.learning_rate, "weight_decay": cfg.weight_decay},
+    training_args = CrossEncoderTrainingArguments(
+        output_dir=cfg.output_dir,
+        num_train_epochs=cfg.epochs,
+        per_device_train_batch_size=cfg.batch_size,
+        warmup_ratio=cfg.warmup_ratio,
+        learning_rate=cfg.learning_rate,
+        weight_decay=cfg.weight_decay,
         max_grad_norm=1.0,
-        output_path=cfg.output_dir,
-        save_best_model=True,
+        fp16=cfg.device == "cuda",
+        seed=cfg.seed,
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+        logging_steps=50,
     )
+
+    trainer = CrossEncoderTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        evaluator=evaluator,
+    )
+    trainer.train()
+    trainer.save_model(cfg.output_dir)
+    logger.info(f"Model saved to {cfg.output_dir}")
 
 
 if __name__ == "__main__":
@@ -234,4 +244,3 @@ if __name__ == "__main__":
     p.add_argument("--samples_train_cache", default="/tmp/dbpedia_train_samples.json")
     p.add_argument("--samples_val_cache",   default="/tmp/dbpedia_val_samples.json")
     train(FinetuneConfig(**vars(p.parse_args())))
-
