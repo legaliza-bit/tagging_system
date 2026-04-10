@@ -164,7 +164,7 @@ def finetune(cfg):
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
 
-    logger.info("Loading DBpedia ontology (~700 classes)...")
+    logger.info("Loading DBpedia ontology (~400 classes)...")
     ontology = load_dbpedia_ontology(cache_path=None)
 
     tag_texts = build_tag_texts(ontology, cfg.tag_format)
