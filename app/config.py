@@ -18,8 +18,8 @@ class Settings(BaseSettings):
 
     TAG_DEDUP_THRESHOLD: float = 0.80
     TAG_ASSIGNMENT_THRESHOLD: float = 0.65
-    TAG_SCORE_MARGIN: float = 0.10   # drop tags scoring more than this below the best
-    TAG_FREQ_ALPHA: float = 0.30     # frequency penalty weight: score -= alpha * (count/total)
+    TAG_SCORE_MARGIN: float = 0.10
+    TAG_FREQ_ALPHA: float = 0.30
     TOP_K_CANDIDATES: int = 10
     TOP_K_TAGS: int = 5
 

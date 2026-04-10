@@ -39,7 +39,7 @@ class Tag(Base):
     id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
     name = Column(String(256), nullable=False, unique=True, index=True)
     description = Column(Text, nullable=True)
-    qdrant_id = Column(String(64), nullable=True, unique=True)  # point ID in Qdrant
+    qdrant_id = Column(String(64), nullable=True, unique=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
     is_active = Column(Boolean, default=True)
@@ -57,8 +57,8 @@ class Document(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
     is_tagged = Column(Boolean, default=False)
-    tagging_confidence = Column(Float, nullable=True)  # overall max confidence
-    dbpedia_label = Column(String(256), nullable=True)   # ground truth for eval
+    tagging_confidence = Column(Float, nullable=True)
+    dbpedia_label = Column(String(256), nullable=True)
     document_tags = relationship("DocumentTag", back_populates="document")
     tags = relationship("Tag", secondary="document_tags", viewonly=True)
 

@@ -49,10 +49,6 @@ def render_tags(tags):
         st.write(f"- **{name}** {verified} ({format_conf(conf)})")
 
 
-# ─────────────────────────────────────────────
-# SIDEBAR
-# ─────────────────────────────────────────────
-
 st.sidebar.title("🏷️ Semantic Tagging")
 
 page = st.sidebar.radio(

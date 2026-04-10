@@ -36,7 +36,6 @@ class TagRetrievalService:
 
         name_to_tag = {t.name: t for t in db_tags}
 
-        # Base score fusion
         scored = []
         for fmt_name, rr_score in reranked:
             tag = name_to_tag.get(fmt_name)
@@ -48,7 +47,6 @@ class TagRetrievalService:
         if not scored:
             return []
 
-        # Frequency penalty: adjusted = score - alpha * (tag_doc_count / total_docs)
         if settings.TAG_FREQ_ALPHA > 0:
             total_docs = await self.repo.count()
             if total_docs > 0:
