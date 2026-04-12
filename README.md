@@ -59,6 +59,7 @@ uv run --group finetuning python -m app.finetuning.evaluate \
 
 ### Eval metrics
 
+```
 Total samples  : 7052
 Classes tested : 369
 
@@ -103,5 +104,6 @@ Building                                0.0%        0.0%        0.0%
 City                                   20.0%       10.0%        0.0%
 Politician                              5.0%       10.0%        0.0%
 ========================================================================
+```
 
 So, as you can see, the finetuned model has learnt to distinguish the more frequent classes better. The rare classes are missing from the training data on purpose, so the bottom classes inevitably score worse.
